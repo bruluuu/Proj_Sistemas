@@ -1,20 +1,27 @@
-# Projeto Sistemas Distribuídos - Parte 1
+# Sistema de Chat Distribuído - Parte 2
 
-Protótipo de chat distribuído implementando comunicação baseada em sockets ZeroMQ, persistência relacional e arquitetura containerizada via Docker Compose.
+Sistema de chat distribuído desenvolvido em Python, Java e PostgreSQL, utilizando ZeroMQ para comunicação de alta performance e MessagePack para serialização.
 
-## Escolhas Tecnológicas
+## Arquitetura da Parte 2
 
-* **Linguagens:** 
-  * **Python (Servidor):** Escolhido pela facilidade e robustez na manipulação de sockets ZeroMQ e integração nativa com bancos de dados relacionais.
-  * **Java (Cliente/Bot):** Utilizado para simular os bots clientes, garantindo o requisito de uso de duas linguagens diferentes no projeto individual.
-* **Serialização:** 
-  * **MessagePack:** Utilizado para realizar a serialização binária das mensagens entre cliente e servidor, atendendo à restrição de não utilizar formatos de texto simples (como JSON ou XML) e incluindo o timestamp obrigatório de envio.
-* **Persistência de Dados:** 
-  * **PostgreSQL:** Cada servidor possui sua própria instância isolada de banco de dados em disco (com volumes Docker independentes), armazenando os nomes de usuários com seus respectivos timestamps de login e os canais criados.
+Esta segunda etapa expande a arquitetura anterior introduzindo um sistema de mensageria baseado no padrão **Publisher-Subscriber (Pub/Sub)**, desacoplado do broker de Requisição-Resposta (Req-Rep).
+
+* **Proxy Pub/Sub**: Gerencia a distribuição de tópicos (canais), operando com um socket XSUB na porta 5557 (recebendo dos servidores) e um socket PUB na porta 5558 (distribuindo para os clientes).
+* **Servidores**: Continuam lidando com autenticação e requisições via Req-Rep na porta 5555, além de persistir todas as mensagens enviadas em bancos PostgreSQL independentes antes de publicá-las no proxy.
+* **Clientes / Bots**: Realizam o login automático, criam/listam canais, inscrevem-se de forma aleatória em pelo menos 3 canais através do socket SUB, e publicam lotes de mensagens de forma cadenciada.
 
 ## Como Executar
 
-Para subir todo o ambiente simulando múltiplos servidores e clientes em execução paralela, execute o comando na raiz do projeto:
+Certifique-se de ter o Docker e o Docker Compose instalados.
+
+Na raiz do projeto, execute:
 
 ```bash
 docker compose up --build
+```
+
+Para iniciar novamente sem recompilar as imagens, caso não tenham ocorrido alterações no código:
+
+```bash
+docker compose up
+```

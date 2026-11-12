@@ -21,6 +21,11 @@ services:
     networks:
       - chat-net
 
+  proxy:
+    build: ./proxy
+    networks:
+      - chat-net
+
   server1:
     build: ./server
     environment:
@@ -30,6 +35,7 @@ services:
       - DB_PASSWORD=password
     depends_on:
       - db1
+      - proxy
     networks:
       - chat-net
 
@@ -42,6 +48,7 @@ services:
       - DB_PASSWORD=password
     depends_on:
       - db2
+      - proxy
     networks:
       - chat-net
 
@@ -52,6 +59,7 @@ services:
       - CLIENT_NAME=Client1
     depends_on:
       - server1
+      - proxy
     networks:
       - chat-net
 
@@ -62,6 +70,7 @@ services:
       - CLIENT_NAME=Client2
     depends_on:
       - server2
+      - proxy
     networks:
       - chat-net
 

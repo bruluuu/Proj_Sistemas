@@ -20,15 +20,23 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("DROP TABLE IF EXISTS users CASCADE;")
     cur.execute("""
-        CREATE TABLE users (
+        CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             username TEXT NOT NULL,
             login_timestamp BIGINT NOT NULL
         );
     """)
     cur.execute("CREATE TABLE IF NOT EXISTS channels (name TEXT PRIMARY KEY, created_at BIGINT);")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            channel TEXT NOT NULL,
+            username TEXT NOT NULL,
+            message TEXT NOT NULL,
+            timestamp BIGINT NOT NULL
+        );
+    """)
     conn.commit()
     cur.close()
     conn.close()
@@ -36,8 +44,13 @@ def init_db():
 def main():
     init_db()
     ctx = zmq.Context()
+    
     sock = ctx.socket(zmq.REP)
     sock.bind("tcp://*:5555")
+
+    pub = ctx.socket(zmq.PUB)
+    pub.connect("tcp://proxy:5557")
+
     print("Servidor online", flush=True)
 
     while True:
@@ -64,7 +77,7 @@ def main():
             elif action == "create_channel":
                 chan = payload.get("channel")
                 if not chan or not chan.strip():
-                    res = {"status": "ERROR", "message": "Nome de canal inválido"}
+                    res = {"status": "ERROR", "message": "Canal inválido"}
                 else:
                     t = int(time.time())
                     cur.execute("SELECT 1 FROM channels WHERE name = %s", (chan,))
@@ -78,6 +91,20 @@ def main():
             elif action == "list_channels":
                 cur.execute("SELECT name FROM channels")
                 res = {"status": "SUCCESS", "channels": [r[0] for r in cur.fetchall()]}
+
+            elif action == "publish":
+                chan = payload.get("channel")
+                user = payload.get("username")
+                text = payload.get("message")
+                if not chan or not text:
+                    res = {"status": "ERROR", "message": "Dados incompletos"}
+                else:
+                    t = int(time.time())
+                    cur.execute("INSERT INTO messages (channel, username, message, timestamp) VALUES (%s, %s, %s, %s)", (chan, user, text, t))
+                    conn.commit()
+                    
+                    pub.send_multipart([chan.encode('utf-8'), msgpack.packb({"username": user, "message": text, "timestamp": t}, use_bin_type=True)])
+                    res = {"status": "SUCCESS"}
 
             cur.close()
             conn.close()
