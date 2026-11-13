@@ -26,6 +26,13 @@ services:
     networks:
       - chat-net
 
+  referencia:
+    build: ./referencia
+    ports:
+      - "5557:5557"
+    networks:
+      - chat-net
+
   server1:
     build: ./server
     environment:
@@ -36,6 +43,7 @@ services:
     depends_on:
       - db1
       - proxy
+      - referencia
     networks:
       - chat-net
 
@@ -49,6 +57,7 @@ services:
     depends_on:
       - db2
       - proxy
+      - referencia
     networks:
       - chat-net
 

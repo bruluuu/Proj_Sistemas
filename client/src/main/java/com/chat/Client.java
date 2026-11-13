@@ -11,11 +11,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class Client {
     private static final ObjectMapper mapper = new ObjectMapper(new MessagePackFactory());
     private static final String HOST = System.getenv().getOrDefault("TARGET_HOST", "server1");
     private static final String USERNAME = System.getenv().getOrDefault("CLIENT_NAME", "BotUser");
+    
+    private static final AtomicInteger relogioLogico = new AtomicInteger(0);
 
     public static void main(String[] args) {
         try { Thread.sleep(5000); } catch (InterruptedException e) {}
@@ -73,8 +76,18 @@ public class Client {
                         if (channelBytes != null && payloadBytes != null) {
                             String channelName = new String(channelBytes, ZMQ.CHARSET);
                             Map msgData = mapper.readValue(payloadBytes, Map.class);
+                            
+                            if (msgData.containsKey("relogio")) {
+                                int relogioRecebido = ((Number) msgData.get("relogio")).intValue();
+                                int current, updated;
+                                do {
+                                    current = relogioLogico.get();
+                                    updated = Math.max(current, relogioRecebido);
+                                } while (!relogioLogico.compareAndSet(current, updated));
+                            }
+
                             long recvTime = Instant.now().getEpochSecond();
-                            System.out.println("Recebido [" + channelName + "] de " + msgData.get("username") + ": " + msgData.get("message") + " (Envio: " + msgData.get("timestamp") + ", Recv: " + recvTime + ")");
+                            System.out.println("Recebido [" + channelName + "] de " + msgData.get("username") + ": " + msgData.get("message") + " (Envio: " + msgData.get("timestamp") + ", Recv: " + recvTime + ", Relogio: " + relogioLogico.get() + ")");
                         }
                     } catch (Exception e) {
                         e.printStackTrace();
@@ -106,14 +119,27 @@ public class Client {
     }
 
     private static Map sendReq(ZMQ.Socket sock, String action, Map<String, Object> payload) throws Exception {
+        int currentClock = relogioLogico.incrementAndGet();
+
         Map<String, Object> req = new HashMap<>();
         req.put("action", action);
         req.put("timestamp", Instant.now().getEpochSecond());
+        req.put("relogio", currentClock);
         req.put("payload", payload);
 
         sock.send(mapper.writeValueAsBytes(req), 0);
         byte[] reply = sock.recv(0);
         Map res = mapper.readValue(reply, Map.class);
+
+        if (res.containsKey("relogio")) {
+            int relogioRecebido = ((Number) res.get("relogio")).intValue();
+            int current, updated;
+            do {
+                current = relogioLogico.get();
+                updated = Math.max(current, relogioRecebido);
+            } while (!relogioLogico.compareAndSet(current, updated));
+        }
+
         return res;
     }
 }
