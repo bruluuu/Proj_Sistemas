@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class Client {
     private static final ObjectMapper mapper = new ObjectMapper(new MessagePackFactory());
-    private static final String HOST = System.getenv().getOrDefault("TARGET_HOST", "server1");
+    private static final String HOST = System.getenv().getOrDefault("SERVER_HOST", "server1");
     private static final String USERNAME = System.getenv().getOrDefault("CLIENT_NAME", "BotUser");
     
     private static final AtomicInteger relogioLogico = new AtomicInteger(0);

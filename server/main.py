@@ -87,7 +87,33 @@ def realizar_eleicao(ctx, ref_socket, pub):
         servers_list = rep_list.get("servers", [])
         if servers_list:
             servers_sorted = sorted(servers_list, key=lambda x: x.get("rank", 999))
-            lider_esperado = servers_sorted[0].get("name")
+            lider_esperado = None
+            for s in servers_sorted:
+                s_name = s.get("name")
+                if s_name == nome_servidor:
+                    lider_esperado = s_name
+                    break
+                try:
+                    test_sock = ctx.socket(zmq.REQ)
+                    test_sock.setsockopt(zmq.RCVTIMEO, 1000)
+                    test_sock.connect(f"tcp://{s_name.lower()}:5555")
+                    relogio_logico += 1
+                    test_sock.send(msgpack.packb({
+                        "action": "eleicao",
+                        "timestamp": int(time.time()),
+                        "relogio": relogio_logico,
+                        "payload": {}
+                    }, use_bin_type=True))
+                    rep = msgpack.unpackb(test_sock.recv(), raw=False)
+                    test_sock.close()
+                    if rep.get("status") == "OK":
+                        lider_esperado = s_name
+                        break
+                except:
+                    pass
+
+            if not lider_esperado:
+                lider_esperado = nome_servidor
             
             if lider_esperado != coordenador_atual:
                 print(f"[Eleição] Servidor eleito coordenador: {lider_esperado}", flush=True)
