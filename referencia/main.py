@@ -49,7 +49,7 @@ while True:
             nome = payload.get("name")
             if nome and nome in ranks:
                 servidores[nome] = agora
-                res = {"status": "SUCCESS", "server_time": agora}
+                res = {"status": "SUCCESS"}
             else:
                 res = {"status": "ERROR", "message": "Desconhecido"}
 

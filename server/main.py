@@ -3,14 +3,16 @@ import zmq
 import msgpack
 import psycopg2
 import os
+import threading
 
 relogio_logico = 0
 mensagens_recebidas = 0
-nome_servidor = os.getenv("DB_NAME", "Servidor1")
+nome_servidor = os.getenv("SERVER_NAME", "server1")
 offset_relogio = 0.0
+coordenador_atual = None
 
 def get_db():
-    for _ in range(10):
+    for _ in range(30):
         try:
             return psycopg2.connect(
                 host=os.getenv("DB_HOST", "db1"),
@@ -19,7 +21,7 @@ def get_db():
                 password=os.getenv("DB_PASSWORD", "password")
             )
         except:
-            time.sleep(2)
+            time.sleep(3)
     raise Exception("Erro DB")
 
 def init_db():
@@ -46,8 +48,58 @@ def init_db():
     cur.close()
     conn.close()
 
+def escutar_servidores():
+    global coordenador_atual, relogio_logico
+    ctx = zmq.Context()
+    sub = ctx.socket(zmq.SUB)
+    sub.connect("tcp://proxy:5558")
+    sub.setsockopt(zmq.SUBSCRIBE, b"servers")
+    while True:
+        try:
+            topico, raw_payload = sub.recv_multipart()
+            dados = msgpack.unpackb(raw_payload, raw=False)
+            if "coordenador" in dados:
+                novo_lider = dados["coordenador"]
+                if novo_lider != coordenador_atual:
+                    print(f"[PubSub] Novo coordenador anunciado: {novo_lider}", flush=True)
+                coordenador_atual = novo_lider
+                if "relogio" in dados:
+                    relogio_logico = max(relogio_logico, dados["relogio"])
+        except:
+            pass
+
+def realizar_eleicao(ctx, ref_socket, pub):
+    global coordenador_atual, relogio_logico
+    try:
+        relogio_logico += 1
+        req_list = {
+            "action": "list",
+            "timestamp": int(time.time()),
+            "relogio": relogio_logico,
+            "payload": {}
+        }
+        ref_socket.send(msgpack.packb(req_list, use_bin_type=True))
+        rep_list = msgpack.unpackb(ref_socket.recv(), raw=False)
+        
+        if "relogio" in rep_list:
+            relogio_logico = max(relogio_logico, rep_list["relogio"])
+
+        servers_list = rep_list.get("servers", [])
+        if servers_list:
+            servers_sorted = sorted(servers_list, key=lambda x: x.get("rank", 999))
+            lider_esperado = servers_sorted[0].get("name")
+            
+            if lider_esperado != coordenador_atual:
+                print(f"[Eleição] Servidor eleito coordenador: {lider_esperado}", flush=True)
+
+            coordenador_atual = lider_esperado
+            relogio_logico += 1
+            pub.send_multipart([b"servers", msgpack.packb({"coordenador": coordenador_atual, "relogio": relogio_logico}, use_bin_type=True)])
+    except:
+        pass
+
 def main():
-    global relogio_logico, mensagens_recebidas, offset_relogio
+    global relogio_logico, mensagens_recebidas, offset_relogio, coordenador_atual
 
     init_db()
     ctx = zmq.Context()
@@ -60,6 +112,8 @@ def main():
 
     ref_socket = ctx.socket(zmq.REQ)
     ref_socket.connect("tcp://referencia:5557")
+
+    threading.Thread(target=escutar_servidores, daemon=True).start()
 
     relogio_logico += 1
     req_rank = {
@@ -76,6 +130,8 @@ def main():
     
     rank = rep_rank.get("rank", 1)
     print(f"Rank {rank}", flush=True)
+    
+    realizar_eleicao(ctx, ref_socket, pub)
     print("Servidor online", flush=True)
 
     while True:
@@ -88,7 +144,7 @@ def main():
             relogio_logico = max(relogio_logico, relogio_recebido)
 
             mensagens_recebidas += 1
-            if mensagens_recebidas >= 10:
+            if mensagens_recebidas >= 15:
                 relogio_logico += 1
                 req_hb = {
                     "action": "heartbeat",
@@ -101,12 +157,31 @@ def main():
                 
                 if "relogio" in rep_hb:
                     relogio_logico = max(relogio_logico, rep_hb["relogio"])
-                
-                if rep_hb.get("status") == "SUCCESS" and "server_time" in rep_hb:
-                    server_time = rep_hb["server_time"]
-                    local_time = time.time()
-                    offset_relogio = server_time - local_time
-                    
+
+                realizar_eleicao(ctx, ref_socket, pub)
+
+                if coordenador_atual and coordenador_atual != nome_servidor:
+                    sincronizado = False
+                    try:
+                        coord_socket = ctx.socket(zmq.REQ)
+                        coord_socket.setsockopt(zmq.RCVTIMEO, 2000)
+                        coord_socket.connect(f"tcp://{coordenador_atual.lower()}:5555")
+                        relogio_logico += 1
+                        coord_socket.send(msgpack.packb({"action": "relogio", "timestamp": int(time.time()), "relogio": relogio_logico, "payload": {}}, use_bin_type=True))
+                        rep_coord = msgpack.unpackb(coord_socket.recv(), raw=False)
+                        if "hora_correta" in rep_coord:
+                            server_time = rep_coord["hora_correta"] / 1000.0
+                            offset_relogio = server_time - time.time()
+                            sincronizado = True
+                        coord_socket.close()
+                    except:
+                        sincronizado = False
+
+                    if not sincronizado:
+                        print(f"[Falha] Coordenador {coordenador_atual} não respondeu! Iniciando reeleição...", flush=True)
+                        coordenador_atual = None
+                        realizar_eleicao(ctx, ref_socket, pub)
+
                 mensagens_recebidas = 0
 
             action = msg.get("action")
@@ -157,6 +232,12 @@ def main():
                     relogio_logico += 1
                     pub.send_multipart([chan.encode('utf-8'), msgpack.packb({"username": user, "message": text, "timestamp": current_time, "relogio": relogio_logico}, use_bin_type=True)])
                     res = {"status": "SUCCESS"}
+
+            elif action == "eleicao":
+                res = {"status": "OK"}
+
+            elif action == "relogio":
+                res = {"status": "SUCCESS", "hora_correta": int((time.time() + offset_relogio) * 1000)}
 
             cur.close()
             conn.close()
