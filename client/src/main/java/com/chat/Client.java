@@ -15,40 +15,80 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class Client {
     private static final ObjectMapper mapper = new ObjectMapper(new MessagePackFactory());
-    private static final String HOST = System.getenv().getOrDefault("SERVER_HOST", "server1");
+    private static final String HOST = System.getenv().getOrDefault("SERVER_HOST", "proxy");
     private static final String USERNAME = System.getenv().getOrDefault("CLIENT_NAME", "BotUser");
     
     private static final AtomicInteger relogioLogico = new AtomicInteger(0);
+
+    private static ZMQ.Socket createReqSocket(ZContext ctx) {
+        ZMQ.Socket sock = ctx.createSocket(ZMQ.REQ);
+        sock.setLinger(0);
+        sock.setReceiveTimeOut(3000);
+        sock.connect("tcp://" + HOST + ":5555");
+        return sock;
+    }
 
     public static void main(String[] args) {
         try { Thread.sleep(5000); } catch (InterruptedException e) {}
 
         try (ZContext ctx = new ZContext()) {
-            ZMQ.Socket reqSock = ctx.createSocket(ZMQ.REQ);
-            reqSock.connect("tcp://" + HOST + ":5555");
+            ZMQ.Socket reqSock = createReqSocket(ctx);
             System.out.println("Conectado como " + USERNAME);
 
             boolean loggedIn = false;
             while (!loggedIn) {
-                Map<String, Object> payload = new HashMap<>();
-                payload.put("username", USERNAME);
-                Map res = sendReq(reqSock, "login", payload);
-                if (res != null && "SUCCESS".equals(res.get("status"))) {
-                    loggedIn = true;
-                } else {
+                try {
+                    Map<String, Object> payload = new HashMap<>();
+                    payload.put("username", USERNAME);
+                    Map res = sendReq(reqSock, "login", payload);
+                    if (res != null && "SUCCESS".equals(res.get("status"))) {
+                        loggedIn = true;
+                    } else {
+                        reqSock.close();
+                        reqSock = createReqSocket(ctx);
+                        Thread.sleep(2000);
+                    }
+                } catch (Exception e) {
+                    reqSock.close();
+                    reqSock = createReqSocket(ctx);
                     Thread.sleep(2000);
                 }
             }
 
-            Map listRes = sendReq(reqSock, "list_channels", new HashMap<>());
+            Map listRes = null;
+            while (listRes == null) {
+                try {
+                    listRes = sendReq(reqSock, "list_channels", new HashMap<>());
+                    if (listRes == null) {
+                        reqSock.close();
+                        reqSock = createReqSocket(ctx);
+                        Thread.sleep(1000);
+                    }
+                } catch (Exception e) {
+                    reqSock.close();
+                    reqSock = createReqSocket(ctx);
+                    Thread.sleep(1000);
+                }
+            }
             List<String> channels = (List<String>) listRes.get("channels");
 
             if (channels == null || channels.size() < 5) {
-                Map<String, Object> cPayload = new HashMap<>();
-                cPayload.put("channel", "canal_" + new Random().nextInt(1000));
-                sendReq(reqSock, "create_channel", cPayload);
-                listRes = sendReq(reqSock, "list_channels", new HashMap<>());
-                channels = (List<String>) listRes.get("channels");
+                try {
+                    Map<String, Object> cPayload = new HashMap<>();
+                    cPayload.put("channel", "canal_" + new Random().nextInt(1000));
+                    Map cRes = sendReq(reqSock, "create_channel", cPayload);
+                    if (cRes == null) {
+                        reqSock.close();
+                        reqSock = createReqSocket(ctx);
+                    }
+                    listRes = sendReq(reqSock, "list_channels", new HashMap<>());
+                    if (listRes != null) {
+                        channels = (List<String>) listRes.get("channels");
+                    }
+                } catch (Exception e) {
+                    reqSock.close();
+                    reqSock = createReqSocket(ctx);
+                }
             }
 
             ZMQ.Socket subSock = ctx.createSocket(ZMQ.SUB);
@@ -102,11 +142,21 @@ public class Client {
                 if (channels != null && !channels.isEmpty()) {
                     String targetChan = channels.get(rand.nextInt(channels.size()));
                     for (int i = 0; i < 10; i++) {
-                        Map<String, Object> pubPayload = new HashMap<>();
-                        pubPayload.put("channel", targetChan);
-                        pubPayload.put("username", USERNAME);
-                        pubPayload.put("message", "Msg teste " + i);
-                        sendReq(reqSock, "publish", pubPayload);
+                        try {
+                            Map<String, Object> pubPayload = new HashMap<>();
+                            pubPayload.put("channel", targetChan);
+                            pubPayload.put("username", USERNAME);
+                            pubPayload.put("message", "Msg teste " + i);
+                            Map res = sendReq(reqSock, "publish", pubPayload);
+                            if (res == null) {
+                                reqSock.close();
+                                reqSock = createReqSocket(ctx);
+                            }
+                        } catch (Exception e) {
+                            reqSock.close();
+                            reqSock = createReqSocket(ctx);
+                            Thread.sleep(2000);
+                        }
                         Thread.sleep(1000);
                     }
                 }
@@ -129,6 +179,11 @@ public class Client {
 
         sock.send(mapper.writeValueAsBytes(req), 0);
         byte[] reply = sock.recv(0);
+        
+        if (reply == null) {
+            return null;
+        }
+
         Map res = mapper.readValue(reply, Map.class);
 
         if (res.containsKey("relogio")) {

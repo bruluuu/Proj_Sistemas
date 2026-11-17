@@ -108,26 +108,22 @@ services:
 
   client1:
     build: ./client
-    container_name: client1
     environment:
-      - SERVER_HOST=server1
+      - SERVER_HOST=proxy
+      - CLIENT_NAME=Client1
     depends_on:
-      - server1
-      - server2
-      - server3
       - proxy
+      - server1
     networks:
       - chat-net
 
   client2:
     build: ./client
-    container_name: client2
     environment:
-      - SERVER_HOST=server2
+      - SERVER_HOST=proxy
+      - CLIENT_NAME=Client2
     depends_on:
-      - server1
-      - server2
-      - server3
       - proxy
+      - server2
     networks:
       - chat-net
