@@ -48,23 +48,84 @@ def init_db():
     cur.close()
     conn.close()
 
+def sincronizar_estado_inicial(ctx):
+    peers = ["server1", "server2", "server3"]
+    for peer in peers:
+        if peer.lower() != nome_servidor.lower():
+            try:
+                sock = ctx.socket(zmq.REQ)
+                sock.setsockopt(zmq.RCVTIMEO, 2000)
+                sock.connect(f"tcp://{peer.lower()}:5555")
+                sock.send(msgpack.packb({"action": "get_state", "timestamp": int(time.time()), "relogio": 0, "payload": {}}, use_bin_type=True))
+                rep = msgpack.unpackb(sock.recv(), raw=False)
+                sock.close()
+                if rep.get("status") == "SUCCESS":
+                    conn = get_db()
+                    cur = conn.cursor()
+                    for u in rep.get("users", []):
+                        cur.execute("INSERT INTO users (username, login_timestamp) SELECT %s, %s WHERE NOT EXISTS (SELECT 1 FROM users WHERE username = %s AND login_timestamp = %s)", (u["username"], u["timestamp"], u["username"], u["timestamp"]))
+                    for c in rep.get("channels", []):
+                        cur.execute("INSERT INTO channels (name, created_at) VALUES (%s, %s) ON CONFLICT (name) DO NOTHING", (c["name"], c["created_at"]))
+                    for m in rep.get("messages", []):
+                        cur.execute("INSERT INTO messages (channel, username, message, timestamp) SELECT %s, %s, %s, %s WHERE NOT EXISTS (SELECT 1 FROM messages WHERE channel = %s AND username = %s AND message = %s AND timestamp = %s)", (m["channel"], m["username"], m["message"], m["timestamp"], m["channel"], m["username"], m["message"], m["timestamp"]))
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                    break
+            except:
+                pass
+
 def escutar_servidores():
     global coordenador_atual, relogio_logico
     ctx = zmq.Context()
     sub = ctx.socket(zmq.SUB)
     sub.connect("tcp://proxy:5558")
     sub.setsockopt(zmq.SUBSCRIBE, b"servers")
+    sub.setsockopt(zmq.SUBSCRIBE, b"replication")
     while True:
         try:
             topico, raw_payload = sub.recv_multipart()
             dados = msgpack.unpackb(raw_payload, raw=False)
-            if "coordenador" in dados:
-                novo_lider = dados["coordenador"]
-                if novo_lider != coordenador_atual:
-                    print(f"[PubSub] Novo coordenador anunciado: {novo_lider}", flush=True)
-                coordenador_atual = novo_lider
-                if "relogio" in dados:
-                    relogio_logico = max(relogio_logico, dados["relogio"])
+            if topico == b"servers":
+                if "coordenador" in dados:
+                    novo_lider = dados["coordenador"]
+                    if novo_lider != coordenador_atual:
+                        print(f"[PubSub] Novo coordenador anunciado: {novo_lider}", flush=True)
+                    coordenador_atual = novo_lider
+                    if "relogio" in dados:
+                        relogio_logico = max(relogio_logico, dados["relogio"])
+            elif topico == b"replication":
+                origem = dados.get("server")
+                if origem != nome_servidor:
+                    tipo = dados.get("type")
+                    payload = dados.get("payload", {})
+                    ts = dados.get("timestamp")
+                    conn = get_db()
+                    cur = conn.cursor()
+                    try:
+                        if tipo == "login":
+                            user = payload.get("username")
+                            if user:
+                                cur.execute("INSERT INTO users (username, login_timestamp) SELECT %s, %s WHERE NOT EXISTS (SELECT 1 FROM users WHERE username = %s AND login_timestamp = %s)", (user, ts, user, ts))
+                                conn.commit()
+                        elif tipo == "create_channel":
+                            chan = payload.get("channel")
+                            if chan:
+                                cur.execute("INSERT INTO channels (name, created_at) VALUES (%s, %s) ON CONFLICT (name) DO NOTHING", (chan, ts))
+                                conn.commit()
+                        elif tipo == "publish":
+                            chan = payload.get("channel")
+                            user = payload.get("username")
+                            text = payload.get("message")
+                            if chan and text:
+                                cur.execute("INSERT INTO messages (channel, username, message, timestamp) SELECT %s, %s, %s, %s WHERE NOT EXISTS (SELECT 1 FROM messages WHERE channel = %s AND username = %s AND message = %s AND timestamp = %s)", (chan, user, text, ts, chan, user, text, ts))
+                                conn.commit()
+                    except Exception as db_err:
+                        conn.rollback()
+                        print(f"Erro replicação DB: {db_err}", flush=True)
+                    finally:
+                        cur.close()
+                        conn.close()
         except:
             pass
 
@@ -95,7 +156,7 @@ def realizar_eleicao(ctx, ref_socket, pub):
                     break
                 try:
                     test_sock = ctx.socket(zmq.REQ)
-                    test_sock.setsockopt(zmq.RCVTIMEO, 1000)
+                    test_sock.setsockopt(zmq.RCVTIMEO, 5000)
                     test_sock.connect(f"tcp://{s_name.lower()}:5555")
                     relogio_logico += 1
                     test_sock.send(msgpack.packb({
@@ -130,6 +191,8 @@ def main():
     init_db()
     ctx = zmq.Context()
     
+    sincronizar_estado_inicial(ctx)
+
     sock = ctx.socket(zmq.REP)
     sock.bind("tcp://*:5555")
 
@@ -227,6 +290,7 @@ def main():
                     cur.execute("INSERT INTO users (username, login_timestamp) VALUES (%s, %s)", (user, current_time))
                     conn.commit()
                     res = {"status": "SUCCESS"}
+                    pub.send_multipart([b"replication", msgpack.packb({"type": "login", "payload": payload, "timestamp": current_time, "server": nome_servidor}, use_bin_type=True)])
 
             elif action == "create_channel":
                 chan = payload.get("channel")
@@ -240,6 +304,7 @@ def main():
                         cur.execute("INSERT INTO channels VALUES (%s, %s)", (chan, current_time))
                         conn.commit()
                         res = {"status": "SUCCESS"}
+                        pub.send_multipart([b"replication", msgpack.packb({"type": "create_channel", "payload": payload, "timestamp": current_time, "server": nome_servidor}, use_bin_type=True)])
 
             elif action == "list_channels":
                 cur.execute("SELECT name FROM channels")
@@ -258,12 +323,22 @@ def main():
                     relogio_logico += 1
                     pub.send_multipart([chan.encode('utf-8'), msgpack.packb({"username": user, "message": text, "timestamp": current_time, "relogio": relogio_logico}, use_bin_type=True)])
                     res = {"status": "SUCCESS"}
+                    pub.send_multipart([b"replication", msgpack.packb({"type": "publish", "payload": payload, "timestamp": current_time, "server": nome_servidor}, use_bin_type=True)])
 
             elif action == "eleicao":
                 res = {"status": "OK"}
 
             elif action == "relogio":
                 res = {"status": "SUCCESS", "hora_correta": int((time.time() + offset_relogio) * 1000)}
+
+            elif action == "get_state":
+                cur.execute("SELECT username, login_timestamp FROM users")
+                users = [{"username": r[0], "timestamp": r[1]} for r in cur.fetchall()]
+                cur.execute("SELECT name, created_at FROM channels")
+                channels = [{"name": r[0], "created_at": r[1]} for r in cur.fetchall()]
+                cur.execute("SELECT channel, username, message, timestamp FROM messages")
+                messages = [{"channel": r[0], "username": r[1], "message": r[2], "timestamp": r[3]} for r in cur.fetchall()]
+                res = {"status": "SUCCESS", "users": users, "channels": channels, "messages": messages}
 
             cur.close()
             conn.close()
