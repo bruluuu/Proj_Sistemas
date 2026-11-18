@@ -1,37 +1,41 @@
-# Sistema de Chat Distribuído - Parte 5: Consistência e Replicação
+Sistema de Chat Distribuído 
 
-Sistema de chat distribuído desenvolvido em **Python, Java e PostgreSQL**, utilizando **ZeroMQ** para comunicação de alta performance, **MessagePack** para serialização e uma arquitetura resiliente com balanceamento de carga, eleição de líderes, sincronização de relógios e replicação total de dados entre os nós.
+Sistema de chat distribuído completo desenvolvido em Python, Java e PostgreSQL, utilizando ZeroMQ para comunicação de alta performance e MessagePack para serialização.
 
----
+Arquitetura Geral do Sistema
 
-## Arquitetura do Sistema
+O projeto foi desenvolvido em etapas evolutivas, culminando em uma arquitetura robusta, tolerante a falhas, com sincronização de relógios e consistência total de dados:
 
-Esta etapa final consolida todas as camadas anteriores e introduz mecanismos robustos de consistência e tolerância a falhas:
+Camada de Rede e Proxy (Broker): Um proxy TCP transparente na porta 5555 realiza o balanceamento de carga round-robin das requisições dos clientes entre os servidores ativos do cluster.
 
-* **Serviço de Referência:** Gerencia a atribuição dinâmica de ranks aos servidores, mantém a lista de nós ativos através de *heartbeats* periódicos e fornece carimbos de tempo para a sincronização física do relógio (Berkeley).
-* **Proxy TCP Transparente (Load Balancer):** Atua na porta `5555` realizando o balanceamento de carga *round-robin* das requisições dos clientes entre os servidores ativos de forma totalmente transparente aos pacotes binários MessagePack.
-* **Relógios Lógicos e Físicos:** Contadores lógicos causalmente ordenados em clientes e servidores, acompanhados do cálculo de offset físico obtido nas mensagens de controle.
-* **Parte 5 - Consistência e Replicação Ativa:** Para garantir que todos os servidores possuam uma cópia completa e idêntica de todas as mensagens, canais e usuários (evitando perda de histórico caso um nó caia), foi implementado um modelo de **Replicação Ativa baseada em Mensagens (State Machine Replication via Pub/Sub Broadcast)** complementada com **Sincronização de Estado Inicial (Catch-up Sync)**:
-  * **Propagação em Tempo Real:** Toda operação de escrita (`login`, `create_channel`, `publish`) processada por um servidor é imediatamente transmitida aos demais nós através de um tópico dedicado de replicação no barramento Pub/Sub (`tcp://proxy:5557`/`5558`).
-  * **Sincronização no Boot:** Ao inicializar, cada servidor consulta os nós vizinhos (`get_state`) para recuperar todo o histórico acumulado caso tenha ficado offline, garantindo consistência eventual imediata.
-  * **Idempotência:** As inserções nas bases de dados PostgreSQL (`db1`, `db2`, `db3`) utilizam restrições e verificações (`NOT EXISTS` / `ON CONFLICT DO NOTHING`) para evitar duplicações de dados.
+Serviço de Referência: Gerencia o registro dinâmico e os ranks dos servidores, monitora nós ativos via heartbeats e fornece o carimbo de tempo para a sincronização física.
 
----
+Relógios Lógicos e Físicos: Contadores lógicos causalmente ordenados incorporados às mensagens e cálculo de offset físico baseado no relógio do coordenador atual para alinhar o tempo do cluster.
 
-## Como Executar
+Eleição de Coordenador e Tolerância a Falhas: Algoritmo dinâmico de escolha de líder baseado em ranks, com verificação de saúde por heartbeat e detecção de falhas com timeout otimizado para evitar falsos positivos.
 
-Certifique-se de ter o **Docker** e o **Docker Compose** instalados na sua máquina.
+Consistência e Replicação Ativa (Parte 5):
 
-### 1. Primeira Execução (ou Reconstrução Completa)
-Para limpar volumes antigos e subir todo o ambiente do zero com o build atualizado:
+Propagação em Tempo Real: Toda mutação de estado (login, create_channel, publish) processada por um servidor é replicada instantaneamente aos demais nós através de um barramento interno de Pub/Sub (replication).
 
-```bash
+Sincronização Inicial (Catch-up Sync): Ao subir ou recuperar de uma queda, cada servidor puxa o histórico completo (users, channels, messages) dos pares ativos via sockets REQ/REP (get_state), garantindo que todos possuam 100% dos dados.
+
+Idempotência: Inserções seguras no PostgreSQL utilizando restrições e verificações (NOT EXISTS / ON CONFLICT DO NOTHING) para evitar duplicidade.
+
+Como Executar
+
+Certifique-se de ter o Docker e o Docker Compose instalados.
+
+1. Primeira Execução (ou Reconstrução Completa)
+
+Para limpar volumes antigos do banco e subir o ambiente do zero:
+
 docker compose down --volumes --remove-orphans
 docker compose up --build
 
-## Execuções Posteriores
 
-Caso o *build* já tenha sido realizado anteriormente e você queira apenas iniciar o sistema rapidamente sem recompilar as imagens:
+Execuções Posteriores
 
-```bash
+Caso o build já tenha sido realizado anteriormente e você queira apenas iniciar o sistema rapidamente sem recompilar as imagens:
+
 docker compose up
